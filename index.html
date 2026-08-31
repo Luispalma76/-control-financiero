@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Control Financiero — Familia Palma</title>
+<meta name="theme-color" content="#F4F6F9" />
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <div id="loading" class="loading-wrap"><div class="spinner"></div></div>
+    <div id="toast" class="toast" style="display:none;"></div>
+
+    <header class="header">
+      <div>
+        <div class="eyebrow">CONTROL FINANCIERO FAMILIA PALMA GUATEMALA</div>
+        <div class="h1">Hola, <span id="greetingName">—</span></div>
+      </div>
+      <button id="changeAuthorBtn" class="change-author-btn">👤 Cambiar</button>
+    </header>
+
+    <main id="content" class="content fadein"></main>
+
+    <nav class="nav">
+      <button class="nav-btn" data-tab="dashboard"><div class="nav-icon">📊</div><span>Resumen</span></button>
+      <button class="nav-btn" data-tab="add"><div class="nav-icon nav-icon-primary">＋</div><span>Agregar</span></button>
+      <button class="nav-btn" data-tab="movs"><div class="nav-icon">📋</div><span>Movtos</span></button>
+      <button class="nav-btn" data-tab="fondos"><div class="nav-icon">🏠</div><span>Fondos</span></button>
+      <button class="nav-btn" data-tab="bancos"><div class="nav-icon">🏦</div><span>Bancos</span></button>
+    </nav>
+
+    <div id="authorModal" class="modal-overlay" style="display:none;">
+      <div class="modal-box">
+        <div class="modal-title">¿Quién eres?</div>
+        <div class="modal-sub">Se recuerda en este dispositivo para saber quién registró cada movimiento.</div>
+        <div class="author-options">
+          <button class="author-btn" data-author="Luis">Luis</button>
+          <button class="author-btn" data-author="Esposa">Esposa</button>
+        </div>
+        <div class="field">
+          <input id="authorCustom" type="text" class="input" placeholder="Otro nombre..." />
+        </div>
+        <button id="authorCustomBtn" class="submit-btn">Usar este nombre</button>
+      </div>
+    </div>
+
+    <div id="cameraOverlay" class="camera-overlay" style="display:none;">
+      <video id="cameraVideo" playsinline muted></video>
+      <div class="camera-hint">Encuadra la boleta o factura</div>
+      <button id="cameraClose" class="camera-close">✕</button>
+      <button id="captureBtn" class="capture-btn"><div class="capture-btn-inner"></div></button>
+    </div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
