@@ -1,4 +1,4 @@
-const CACHE_NAME = "control-financiero-v1";
+const CACHE_NAME = "control-financiero-v2";
 const SHELL = ["./", "index.html", "style.css", "app.js", "config.js", "manifest.json"];
 
 self.addEventListener("install", (event) => {
@@ -13,10 +13,18 @@ self.addEventListener("activate", (event) => {
   self.clients.claim();
 });
 
+// Estrategia "red primero": siempre intenta traer la versión más nueva.
+// Solo usa la copia guardada si no hay internet. Así, cada vez que actualicemos
+// la app, se ve reflejado de inmediato sin quedar pegado en una versión vieja.
 self.addEventListener("fetch", (event) => {
-  // Nunca cachear llamadas a la API o a Firestore: siempre deben ir a la red.
-  if (event.request.url.includes("/api/") || event.request.url.includes("firestore")) return;
+  if (event.request.url.includes("/api/") || event.request.url.includes("firestore") || event.request.url.includes("googleapis")) return;
   event.respondWith(
-    caches.match(event.request).then((cached) => cached || fetch(event.request))
+    fetch(event.request)
+      .then((res) => {
+        const resClone = res.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, resClone));
+        return res;
+      })
+      .catch(() => caches.match(event.request))
   );
 });
