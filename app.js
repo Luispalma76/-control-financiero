@@ -60,6 +60,7 @@ const form = {
   cuotas: "1",
   efectivoOrigen: "cajero",
   cajeroAccountId: "",
+  editingId: null,
   creatingBucket: false,
   newBucketName: "",
   newBucketEmoji: EMOJI_OPTIONS[0],
@@ -68,8 +69,10 @@ const form = {
 };
 
 const filters = { bucket: "all", type: "all", month: monthKey(todayISO()) };
-const bankForm = { nombre: "", tipo: "debito", saldoInicial: "", lineaCredito: "" };
+const bankForm = { nombre: "", tipo: "debito", saldoInicial: "", lineaCredito: "", editingId: null };
 const payForm = { creditId: "", amount: "", fromAccountId: "" };
+let reminders = [];
+const reminderForm = { label: "", tipo: "mensual", day: "1", fecha: todayISO(), monthDay: "01-01", fondoId: "", editingId: null, creating: false };
 
 // ---------- Control de acceso (clave compartida + sesión anónima segura) ----------
 let appStarted = false;
@@ -136,6 +139,11 @@ function initApp() {
   db.collection("settings").doc("appSettings").onSnapshot((doc) => {
     settings = doc.exists ? { metas: {}, ...doc.data() } : { metas: {} };
     if (!settings.metas) settings.metas = {};
+    render();
+  });
+
+  db.collection("reminders").onSnapshot((snap) => {
+    reminders = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     render();
   });
 }
@@ -238,14 +246,43 @@ async function addMovement() {
     type: effType, bucket: form.bucket, category: form.category.trim(),
     amount: val, date: form.date, note: (form.note || "").trim(),
     accountId, medioPago, cuotas, efectivoOrigen,
-    author: authorName || "—", createdAt: Date.now(),
+    author: authorName || "—",
   };
   try {
-    await db.collection("movements").add(entry);
-    form.amount = ""; form.note = ""; form.date = todayISO(); form.cuotas = "1";
-    showToast("Movimiento guardado");
-    setTab("dashboard");
+    if (form.editingId) {
+      await db.collection("movements").doc(form.editingId).update(entry);
+      showToast("Movimiento actualizado");
+    } else {
+      await db.collection("movements").add({ ...entry, createdAt: Date.now() });
+      showToast("Movimiento guardado");
+    }
+    form.amount = ""; form.note = ""; form.date = todayISO(); form.cuotas = "1"; form.editingId = null;
+    setTab("movs");
   } catch (err) { showToast("No se pudo guardar: " + err.message); }
+}
+
+function editMovement(id) {
+  const m = movs.find((x) => x.id === id);
+  if (!m) return;
+  if (m.type === "pago_tarjeta" || !m.bucket) { showToast("Este tipo de movimiento no se puede editar, solo eliminar"); return; }
+  form.editingId = id;
+  form.bucket = m.bucket;
+  form.movType = m.type === "aporte" ? "egreso" : m.type;
+  form.category = m.category;
+  form.amount = String(m.amount);
+  form.date = m.date;
+  form.note = m.note || "";
+  form.accountId = m.accountId || "";
+  form.medioPago = m.medioPago || "debito";
+  form.cuotas = m.cuotas ? String(m.cuotas) : "1";
+  form.efectivoOrigen = m.efectivoOrigen || "cajero";
+  form.cajeroAccountId = m.medioPago === "efectivo" && m.efectivoOrigen === "cajero" ? (m.accountId || "") : "";
+  setTab("add");
+}
+
+function cancelEditMovement() {
+  form.editingId = null; form.amount = ""; form.note = ""; form.date = todayISO(); form.cuotas = "1";
+  setTab("movs");
 }
 
 async function deleteMovement(id) {
@@ -279,15 +316,120 @@ async function saveMeta(bucketId, value) {
 async function addAccount() {
   const nombre = bankForm.nombre.trim();
   if (!nombre) { showToast("Ingresa el nombre del banco"); return; }
-  const payload = { nombre, tipo: bankForm.tipo, createdAt: Date.now() };
+  const payload = { nombre, tipo: bankForm.tipo };
   if (bankForm.tipo === "credito") payload.lineaCredito = parseFloat(bankForm.lineaCredito) || 0;
   else payload.saldoInicial = parseFloat(bankForm.saldoInicial) || 0;
   try {
-    await db.collection("accounts").add(payload);
-    bankForm.nombre = ""; bankForm.saldoInicial = ""; bankForm.lineaCredito = "";
-    showToast("Cuenta bancaria agregada");
+    if (bankForm.editingId) {
+      await db.collection("accounts").doc(bankForm.editingId).update(payload);
+      showToast("Cuenta actualizada");
+    } else {
+      await db.collection("accounts").add({ ...payload, createdAt: Date.now() });
+      showToast("Cuenta bancaria agregada");
+    }
+    bankForm.nombre = ""; bankForm.saldoInicial = ""; bankForm.lineaCredito = ""; bankForm.editingId = null;
     render();
-  } catch (err) { showToast("No se pudo agregar: " + err.message); }
+  } catch (err) { showToast("No se pudo guardar: " + err.message); }
+}
+
+function editAccount(id) {
+  const a = accounts.find((x) => x.id === id);
+  if (!a) return;
+  bankForm.editingId = id;
+  bankForm.nombre = a.nombre;
+  bankForm.tipo = a.tipo || "debito";
+  bankForm.saldoInicial = a.saldoInicial != null ? String(a.saldoInicial) : "";
+  bankForm.lineaCredito = a.lineaCredito != null ? String(a.lineaCredito) : "";
+  render();
+  window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+}
+
+function cancelEditAccount() {
+  bankForm.editingId = null; bankForm.nombre = ""; bankForm.saldoInicial = ""; bankForm.lineaCredito = "";
+  render();
+}
+
+// ---------- Recordatorios ----------
+function nextOccurrence(r, todayStr) {
+  const t = new Date(todayStr + "T00:00:00");
+  if (r.tipo === "unico") {
+    const d = new Date(r.fecha + "T00:00:00");
+    return d >= t ? d : null;
+  }
+  if (r.tipo === "mensual") {
+    const day = parseInt(r.day, 10) || 1;
+    let d = new Date(t.getFullYear(), t.getMonth(), day);
+    if (d < t) d = new Date(t.getFullYear(), t.getMonth() + 1, day);
+    return d;
+  }
+  if (r.tipo === "anual") {
+    const parts = (r.monthDay || "01-01").split("-").map(Number);
+    let d = new Date(t.getFullYear(), (parts[0] || 1) - 1, parts[1] || 1);
+    if (d < t) d = new Date(t.getFullYear() + 1, (parts[0] || 1) - 1, parts[1] || 1);
+    return d;
+  }
+  return null;
+}
+
+function upcomingReminders() {
+  const today = todayISO();
+  return reminders
+    .map((r) => {
+      const d = nextOccurrence(r, today);
+      if (!d) return null;
+      const days = Math.round((d - new Date(today + "T00:00:00")) / 86400000);
+      return { ...r, nextDate: d, daysUntil: days };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.daysUntil - b.daysUntil);
+}
+
+async function addReminder() {
+  const label = reminderForm.label.trim();
+  if (!label) { showToast("Ponle un nombre al recordatorio"); return; }
+  const payload = { label, tipo: reminderForm.tipo, fondoId: reminderForm.fondoId || null };
+  if (reminderForm.tipo === "unico") payload.fecha = reminderForm.fecha;
+  if (reminderForm.tipo === "mensual") payload.day = parseInt(reminderForm.day, 10) || 1;
+  if (reminderForm.tipo === "anual") payload.monthDay = reminderForm.monthDay;
+  try {
+    if (reminderForm.editingId) {
+      await db.collection("reminders").doc(reminderForm.editingId).update(payload);
+      showToast("Recordatorio actualizado");
+    } else {
+      await db.collection("reminders").add({ ...payload, createdAt: Date.now() });
+      showToast("Recordatorio creado");
+    }
+    Object.assign(reminderForm, { label: "", tipo: "mensual", day: "1", fecha: todayISO(), monthDay: "01-01", fondoId: "", editingId: null, creating: false });
+    render();
+  } catch (err) { showToast("No se pudo guardar: " + err.message); }
+}
+
+function editReminder(id) {
+  const r = reminders.find((x) => x.id === id);
+  if (!r) return;
+  Object.assign(reminderForm, {
+    editingId: id, creating: true, label: r.label, tipo: r.tipo,
+    day: r.day ? String(r.day) : "1", fecha: r.fecha || todayISO(), monthDay: r.monthDay || "01-01", fondoId: r.fondoId || "",
+  });
+  render();
+}
+
+async function deleteReminder(id) {
+  if (!confirm("¿Eliminar este recordatorio?")) return;
+  try { await db.collection("reminders").doc(id).delete(); }
+  catch (err) { showToast("No se pudo eliminar: " + err.message); }
+}
+
+function maybeNotify() {
+  const due = upcomingReminders().filter((r) => r.daysUntil <= 0);
+  if (due.length === 0) return;
+  if (!("Notification" in window)) return;
+  if (Notification.permission === "default") { Notification.requestPermission(); return; }
+  if (Notification.permission !== "granted") return;
+  const key = "cf_notified_" + todayISO();
+  if (localStorage.getItem(key)) return;
+  localStorage.setItem(key, "1");
+  due.forEach((r) => new Notification("Control Financiero — " + r.label, { body: r.daysUntil === 0 ? "Vence hoy" : "Venció hace " + Math.abs(r.daysUntil) + " día(s)" }));
 }
 
 async function payCreditCard() {
@@ -387,6 +529,54 @@ function renderDashboard(el) {
       </div>
     </div>
 
+    <div class="section-label" style="display:flex;justify-content:space-between;align-items:center">
+      <span>🔔 Próximos pagos y aportes</span>
+      <button id="toggleReminderForm" style="background:none;border:none;color:#002A7A;font-weight:700;font-size:12px;cursor:pointer">${reminderForm.creating ? "Cerrar" : "+ Nuevo"}</button>
+    </div>
+    <div style="display:grid;gap:8px;margin-top:8px">
+      ${upcomingReminders().length === 0 ? `<div class="empty-text">Sin recordatorios. Agrega uno para no olvidar contribuciones, tarjetas o aportes de ahorro.</div>` : upcomingReminders().slice(0, 6).map((r) => {
+        const urgent = r.daysUntil <= 0;
+        const soon = r.daysUntil > 0 && r.daysUntil <= 7;
+        const color = urgent ? "#DC2626" : soon ? "#D97706" : "#6B7280";
+        const label = urgent ? (r.daysUntil === 0 ? "Hoy" : "Vencido") : `En ${r.daysUntil} día${r.daysUntil === 1 ? "" : "s"}`;
+        return `<div class="account-card" style="border-left:3px solid ${color}">
+          <div><div class="account-name">${r.label}</div><div class="card-sub">${r.nextDate.toLocaleDateString("es-CL")}</div></div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span class="tx-tag" style="background:${color}22;color:${color}">${label}</span>
+            ${r.fondoId ? `<button class="reminder-aporte-btn" data-fondo="${r.fondoId}" style="background:none;border:none;cursor:pointer;font-size:14px">💰</button>` : ""}
+            <button class="edit-reminder-btn" data-id="${r.id}" style="background:none;border:none;cursor:pointer;font-size:14px">✏️</button>
+            <button class="delete-reminder-btn" data-id="${r.id}" style="background:none;border:none;cursor:pointer;font-size:14px">🗑️</button>
+          </div>
+        </div>`;
+      }).join("")}
+    </div>
+
+    ${reminderForm.creating ? `
+      <div class="field">
+        <label class="label">Nombre</label>
+        <input id="remLabelInput" type="text" class="input" placeholder="Ej: Contribuciones, Pago tarjeta Falabella..." value="${reminderForm.label}" />
+      </div>
+      <div class="type-row">
+        <button id="remTipoMensual" class="type-btn ${reminderForm.tipo==='mensual'?'ingreso-active':''}">Cada mes</button>
+        <button id="remTipoAnual" class="type-btn ${reminderForm.tipo==='anual'?'egreso-active':''}">Cada año</button>
+        <button id="remTipoUnico" class="type-btn ${reminderForm.tipo==='unico'?'ingreso-active':''}">Una vez</button>
+      </div>
+      ${reminderForm.tipo === "mensual" ? `
+        <div class="field"><label class="label">Día del mes (1-31)</label><input id="remDayInput" type="number" min="1" max="31" class="input" value="${reminderForm.day}" /></div>` : ""}
+      ${reminderForm.tipo === "anual" ? `
+        <div class="field"><label class="label">Fecha cada año (mes-día)</label><input id="remMonthDayInput" type="text" placeholder="MM-DD, ej: 04-30" class="input" value="${reminderForm.monthDay}" /></div>` : ""}
+      ${reminderForm.tipo === "unico" ? `
+        <div class="field"><label class="label">Fecha</label><input id="remFechaInput" type="date" class="input" value="${reminderForm.fecha}" /></div>` : ""}
+      <div class="field">
+        <label class="label">¿Vinculado a un Fondo de ahorro? (opcional)</label>
+        <select id="remFondoSelect" class="input">
+          <option value="">Ninguno</option>
+          ${fondoBuckets().map((b) => `<option value="${b.id}" ${reminderForm.fondoId===b.id?"selected":""}>${b.label}</option>`).join("")}
+        </select>
+      </div>
+      <button id="saveReminderBtn" class="submit-btn">${reminderForm.editingId ? "Guardar cambios" : "Crear recordatorio"}</button>
+    ` : ""}
+
     <div class="bucket-list">
       ${operationalBuckets().map((meta) => `
         <div class="card card-block" style="border-left:3px solid ${meta.color}">
@@ -418,6 +608,34 @@ function renderDashboard(el) {
     <div class="chart-wrap"><canvas id="chartCanvas"></canvas></div>
   `;
 
+  document.getElementById("toggleReminderForm").addEventListener("click", () => {
+    reminderForm.creating = !reminderForm.creating;
+    if (!reminderForm.creating) reminderForm.editingId = null;
+    render();
+  });
+  const remLabel = document.getElementById("remLabelInput");
+  if (remLabel) remLabel.addEventListener("input", (e) => { reminderForm.label = e.target.value; });
+  const rtM = document.getElementById("remTipoMensual"), rtA = document.getElementById("remTipoAnual"), rtU = document.getElementById("remTipoUnico");
+  if (rtM) rtM.addEventListener("click", () => { reminderForm.tipo = "mensual"; render(); });
+  if (rtA) rtA.addEventListener("click", () => { reminderForm.tipo = "anual"; render(); });
+  if (rtU) rtU.addEventListener("click", () => { reminderForm.tipo = "unico"; render(); });
+  const remDay = document.getElementById("remDayInput");
+  if (remDay) remDay.addEventListener("input", (e) => { reminderForm.day = e.target.value; });
+  const remMonthDay = document.getElementById("remMonthDayInput");
+  if (remMonthDay) remMonthDay.addEventListener("input", (e) => { reminderForm.monthDay = e.target.value; });
+  const remFecha = document.getElementById("remFechaInput");
+  if (remFecha) remFecha.addEventListener("input", (e) => { reminderForm.fecha = e.target.value; });
+  const remFondo = document.getElementById("remFondoSelect");
+  if (remFondo) remFondo.addEventListener("change", (e) => { reminderForm.fondoId = e.target.value; });
+  const saveRem = document.getElementById("saveReminderBtn");
+  if (saveRem) saveRem.addEventListener("click", addReminder);
+  document.querySelectorAll(".edit-reminder-btn").forEach((b) => b.addEventListener("click", () => editReminder(b.dataset.id)));
+  document.querySelectorAll(".delete-reminder-btn").forEach((b) => b.addEventListener("click", () => deleteReminder(b.dataset.id)));
+  document.querySelectorAll(".reminder-aporte-btn").forEach((b) => b.addEventListener("click", () => {
+    form.bucket = b.dataset.fondo; form.category = ""; setTab("add");
+  }));
+  maybeNotify();
+
   const ctx = document.getElementById("chartCanvas");
   const data = computeChartData();
   if (chartInstance) chartInstance.destroy();
@@ -448,7 +666,8 @@ function renderAdd(el) {
   const suggestions = categorySuggestions(form.bucket, effType);
 
   el.innerHTML = `
-    <div class="chip" style="display:inline-block;margin-top:2px">Registrando como: <strong>${authorName || "—"}</strong></div>
+    ${form.editingId ? `<div class="ai-banner" style="margin-top:0"><span>✏️</span><span style="flex:1">Editando movimiento existente</span></div>` : ""}
+    <div class="chip" style="display:inline-block;margin-top:8px">Registrando como: <strong>${authorName || "—"}</strong></div>
 
     ${!isFondo ? `
       <div class="type-row">
@@ -569,7 +788,8 @@ function renderAdd(el) {
       <input id="noteInput" type="text" placeholder="Ej: Sodimac, cliente Las Condes..." class="input" value="${form.note}" />
     </div>
 
-    <button id="submitBtn" class="submit-btn">Guardar movimiento</button>
+    <button id="submitBtn" class="submit-btn">${form.editingId ? "Guardar cambios" : "Guardar movimiento"}</button>
+    ${form.editingId ? `<button id="cancelEditBtn" class="submit-btn submit-btn-secondary" style="margin-top:8px">Cancelar edición</button>` : ""}
   `;
 
   const te = document.getElementById("typeEgreso");
@@ -615,6 +835,8 @@ function renderAdd(el) {
   if (cajeroSel) cajeroSel.addEventListener("change", (e) => { form.cajeroAccountId = e.target.value; });
 
   document.getElementById("submitBtn").addEventListener("click", addMovement);
+  const cancelEdit = document.getElementById("cancelEditBtn");
+  if (cancelEdit) cancelEdit.addEventListener("click", cancelEditMovement);
 }
 
 function renderMovs(el) {
@@ -673,6 +895,7 @@ function renderMovs(el) {
               </div>
             </div>
             <div class="tx-amount" style="color:${color}">${isPositive ? "+" : "-"}${money(e.amount)}</div>
+            ${e.bucket ? `<button class="edit-mov-btn" data-id="${e.id}" style="background:none;border:none;cursor:pointer;font-size:14px;padding:4px">✏️</button>` : ""}
             <button class="delete-btn" data-id="${e.id}">🗑️</button>
           </div>`;
       }).join("")}
@@ -687,6 +910,7 @@ function renderMovs(el) {
   document.querySelectorAll(".delete-btn").forEach((b) => b.addEventListener("click", () => {
     if (confirm("¿Eliminar este movimiento?")) deleteMovement(b.dataset.id);
   }));
+  document.querySelectorAll(".edit-mov-btn").forEach((b) => b.addEventListener("click", () => editMovement(b.dataset.id)));
   document.getElementById("exportPdfBtn").addEventListener("click", () => generatePDFReport(list, breakdownArr, total));
 }
 
@@ -747,7 +971,11 @@ function renderBancos(el) {
         const st = accountStatus(a);
         return `<div class="account-card">
           <div><div class="account-name">🏦 ${a.nombre}</div><div class="card-sub">Saldo inicial: ${money(a.saldoInicial)}</div></div>
-          <div style="display:flex;align-items:center;gap:10px"><span class="account-balance" style="color:${st.saldo>=0?'#12151A':'#DC2626'}">${money(st.saldo)}</span><button class="delete-btn" data-id="${a.id}">🗑️</button></div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span class="account-balance" style="color:${st.saldo>=0?'#12151A':'#DC2626'}">${money(st.saldo)}</span>
+            <button class="edit-account-btn" data-id="${a.id}" style="background:none;border:none;cursor:pointer;font-size:14px">✏️</button>
+            <button class="delete-btn" data-id="${a.id}">🗑️</button>
+          </div>
         </div>`;
       }).join("")}
     </div>
@@ -765,6 +993,7 @@ function renderBancos(el) {
           </div>
           <div style="margin-top:10px"><div class="progress-track"><div class="progress-fill" style="width:${pct}%;background:#DC2626"></div></div><div class="progress-text">${pct.toFixed(1)}% usado de ${money(st.linea)}</div></div>
           <button class="delete-btn pay-card-toggle" data-id="${a.id}" style="margin-top:8px;font-size:12px;color:#002A7A;font-weight:700">💰 Pagar esta tarjeta</button>
+          <button class="edit-account-btn" data-id="${a.id}" style="float:right;background:none;border:none;cursor:pointer;font-size:14px">✏️</button>
           <button class="delete-btn" data-id="${a.id}" style="float:right">🗑️</button>
           ${payForm.creditId === a.id ? `
             <div class="field">
@@ -784,7 +1013,7 @@ function renderBancos(el) {
       }).join("")}
     </div>
 
-    <div class="section-label">Agregar cuenta bancaria</div>
+    <div class="section-label">${bankForm.editingId ? "Editar cuenta bancaria" : "Agregar cuenta bancaria"}</div>
     <div class="type-row">
       <button id="tipoDebitoBtn" class="type-btn ${bankForm.tipo==='debito'?'ingreso-active':''}">🏦 Débito</button>
       <button id="tipoCreditoBtn" class="type-btn ${bankForm.tipo==='credito'?'egreso-active':''}">💳 Crédito</button>
@@ -802,7 +1031,8 @@ function renderBancos(el) {
         <label class="label">Línea de crédito total (CLP)</label>
         <input id="bankLineaInput" type="number" class="input" placeholder="Ej: 1500000" value="${bankForm.lineaCredito}" />
       </div>`}
-    <button id="addBankBtn" class="submit-btn">Agregar cuenta bancaria</button>
+    <button id="addBankBtn" class="submit-btn">${bankForm.editingId ? "Guardar cambios" : "Agregar cuenta bancaria"}</button>
+    ${bankForm.editingId ? `<button id="cancelEditBankBtn" class="submit-btn submit-btn-secondary" style="margin-top:8px">Cancelar edición</button>` : ""}
     <div class="empty-text" style="margin-top:14px">Cada egreso o ingreso que asignes a un banco/tarjeta ajusta su saldo o deuda automáticamente.</div>
   `;
 
@@ -814,6 +1044,8 @@ function renderBancos(el) {
   const bLinea = document.getElementById("bankLineaInput");
   if (bLinea) bLinea.addEventListener("input", (e) => { bankForm.lineaCredito = e.target.value; });
   document.getElementById("addBankBtn").addEventListener("click", addAccount);
+  const cancelEditBank = document.getElementById("cancelEditBankBtn");
+  if (cancelEditBank) cancelEditBank.addEventListener("click", cancelEditAccount);
 
   document.querySelectorAll(".pay-card-toggle").forEach((b) => b.addEventListener("click", () => {
     payForm.creditId = payForm.creditId === b.dataset.id ? "" : b.dataset.id;
@@ -826,6 +1058,7 @@ function renderBancos(el) {
   const confirmPay = document.getElementById("confirmPayBtn");
   if (confirmPay) confirmPay.addEventListener("click", payCreditCard);
 
+  document.querySelectorAll(".edit-account-btn").forEach((b) => b.addEventListener("click", () => editAccount(b.dataset.id)));
   document.querySelectorAll(".delete-btn:not(.pay-card-toggle)").forEach((b) => b.addEventListener("click", () => deleteAccount(b.dataset.id)));
 }
 
