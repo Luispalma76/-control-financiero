@@ -1,6 +1,7 @@
 // ---------- Firebase ----------
 firebase.initializeApp(window.FIREBASE_CONFIG);
 const db = firebase.firestore();
+const auth = firebase.auth();
 
 // ---------- Constantes ----------
 const CASA_KEY = "ahorro_casa";
@@ -55,8 +56,10 @@ const form = {
   date: todayISO(),
   note: "",
   accountId: "",
-  scanning: false,
-  scanBanner: false,
+  medioPago: "debito",
+  cuotas: "1",
+  efectivoOrigen: "cajero",
+  cajeroAccountId: "",
   creatingBucket: false,
   newBucketName: "",
   newBucketEmoji: EMOJI_OPTIONS[0],
@@ -65,11 +68,79 @@ const form = {
 };
 
 const filters = { bucket: "all", type: "all", month: monthKey(todayISO()) };
-const bankForm = { nombre: "", saldoInicial: "" };
+const bankForm = { nombre: "", tipo: "debito", saldoInicial: "", lineaCredito: "" };
+const payForm = { creditId: "", amount: "", fromAccountId: "" };
 
-let cameraStream = null;
+// ---------- Control de acceso (clave compartida + sesión anónima segura) ----------
+let appStarted = false;
 
-// ---------- Autor (quién eres) ----------
+function tryPin() {
+  const val = document.getElementById("pinInput").value.trim();
+  if (val.toLowerCase() === String(window.APP_PIN || "").toLowerCase()) {
+    auth.signInAnonymously().catch((err) => showToast("Error de acceso: " + err.message));
+  } else {
+    showToast("Clave incorrecta");
+  }
+}
+document.getElementById("pinSubmitBtn").addEventListener("click", tryPin);
+document.getElementById("pinInput").addEventListener("keydown", (e) => { if (e.key === "Enter") tryPin(); });
+
+auth.onAuthStateChanged((user) => {
+  if (user) {
+    document.getElementById("pinScreen").style.display = "none";
+    if (!appStarted) { appStarted = true; initApp(); }
+  } else {
+    document.getElementById("loading").style.display = "none";
+    document.getElementById("pinScreen").style.display = "flex";
+  }
+});
+
+function initApp() {
+  // ---------- Autor (quién eres) ----------
+  if (!authorName) showAuthorModal(); else updateGreeting();
+
+  document.querySelectorAll(".author-btn").forEach((b) => b.addEventListener("click", () => setAuthor(b.dataset.author)));
+  document.getElementById("authorCustomBtn").addEventListener("click", () => {
+    const v = document.getElementById("authorCustom").value.trim();
+    if (v) setAuthor(v);
+  });
+  document.getElementById("changeAuthorBtn").addEventListener("click", showAuthorModal);
+
+  // ---------- Firestore listeners (sincroniza todos los dispositivos) ----------
+  db.collection("movements").orderBy("date", "desc").onSnapshot((snap) => {
+    movs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    document.getElementById("loading").style.display = "none";
+    render();
+  }, (err) => showToast("Error de conexión: " + err.message));
+
+  db.collection("buckets").onSnapshot(async (snap) => {
+    if (snap.empty && !bucketsSeeded) {
+      bucketsSeeded = true;
+      const batch = db.batch();
+      DEFAULT_BUCKETS.forEach((b) => {
+        const ref = db.collection("buckets").doc(b.id);
+        batch.set(ref, { label: b.label, icon: b.icon, color: b.color, isFondo: b.isFondo });
+      });
+      await batch.commit().catch(() => {});
+      return; // el propio commit disparará este listener de nuevo
+    }
+    buckets = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    render();
+  });
+
+  db.collection("accounts").orderBy("createdAt", "asc").onSnapshot((snap) => {
+    accounts = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    render();
+  });
+
+  db.collection("settings").doc("appSettings").onSnapshot((doc) => {
+    settings = doc.exists ? { metas: {}, ...doc.data() } : { metas: {} };
+    if (!settings.metas) settings.metas = {};
+    render();
+  });
+}
+
+// ---------- Autor (quién eres): funciones base ----------
 function updateGreeting() {
   document.getElementById("greetingName").textContent = authorName || "—";
 }
@@ -85,47 +156,6 @@ function setAuthor(name) {
   updateGreeting();
   hideAuthorModal();
 }
-if (!authorName) showAuthorModal(); else updateGreeting();
-
-document.querySelectorAll(".author-btn").forEach((b) => b.addEventListener("click", () => setAuthor(b.dataset.author)));
-document.getElementById("authorCustomBtn").addEventListener("click", () => {
-  const v = document.getElementById("authorCustom").value.trim();
-  if (v) setAuthor(v);
-});
-document.getElementById("changeAuthorBtn").addEventListener("click", showAuthorModal);
-
-// ---------- Firestore listeners (sincroniza todos los dispositivos) ----------
-db.collection("movements").orderBy("date", "desc").onSnapshot((snap) => {
-  movs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  document.getElementById("loading").style.display = "none";
-  render();
-}, (err) => showToast("Error de conexión: " + err.message));
-
-db.collection("buckets").onSnapshot(async (snap) => {
-  if (snap.empty && !bucketsSeeded) {
-    bucketsSeeded = true;
-    const batch = db.batch();
-    DEFAULT_BUCKETS.forEach((b) => {
-      const ref = db.collection("buckets").doc(b.id);
-      batch.set(ref, { label: b.label, icon: b.icon, color: b.color, isFondo: b.isFondo });
-    });
-    await batch.commit().catch(() => {});
-    return; // el propio commit disparará este listener de nuevo
-  }
-  buckets = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  render();
-});
-
-db.collection("accounts").orderBy("createdAt", "asc").onSnapshot((snap) => {
-  accounts = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  render();
-});
-
-db.collection("settings").doc("appSettings").onSnapshot((doc) => {
-  settings = doc.exists ? { metas: {}, ...doc.data() } : { metas: {} };
-  if (!settings.metas) settings.metas = {};
-  render();
-});
 
 // ---------- Utilidades ----------
 function showToast(msg) {
@@ -135,7 +165,10 @@ function showToast(msg) {
   clearTimeout(showToast._t);
   showToast._t = setTimeout(() => { t.style.display = "none"; }, 2200);
 }
-function getBucket(id) { return buckets.find((b) => b.id === id) || DEFAULT_BUCKETS.find((b) => b.id === id); }
+function getBucket(id) {
+  if (!id) return { icon: "🔁", color: "#6B7280", label: "Transferencia" };
+  return buckets.find((b) => b.id === id) || DEFAULT_BUCKETS.find((b) => b.id === id);
+}
 function operationalBuckets() { return buckets.filter((b) => !b.isFondo); }
 function fondoBuckets() { return buckets.filter((b) => b.isFondo); }
 
@@ -147,16 +180,28 @@ function categorySuggestions(bucketId, type) {
   return Array.from(used);
 }
 
-function accountBalance(accId) {
-  const acc = accounts.find((a) => a.id === accId);
-  if (!acc) return 0;
-  let bal = parseFloat(acc.saldoInicial) || 0;
+function accountStatus(acc) {
+  if (!acc) return { saldo: 0 };
+  if (acc.tipo === "credito") {
+    let deuda = 0;
+    movs.forEach((m) => {
+      if (m.accountId !== acc.id) return;
+      if (m.type === "egreso") deuda += m.amount;
+      if (m.type === "pago_tarjeta") deuda -= m.amount;
+    });
+    const linea = parseFloat(acc.lineaCredito) || 0;
+    return { tipo: "credito", deuda, disponible: linea - deuda, linea };
+  }
+  let saldo = parseFloat(acc.saldoInicial) || 0;
   movs.forEach((m) => {
-    if (m.accountId !== accId) return;
-    bal += m.type === "ingreso" ? m.amount : -m.amount;
+    if (m.accountId !== acc.id) return;
+    if (m.type === "ingreso") saldo += m.amount;
+    else saldo -= m.amount; // egreso, aporte, pago_tarjeta (transferencia saliente)
   });
-  return bal;
+  return { tipo: "debito", saldo };
 }
+function debitAccounts() { return accounts.filter((a) => a.tipo !== "credito"); }
+function creditAccounts() { return accounts.filter((a) => a.tipo === "credito"); }
 
 function setTab(next) { tab = next; render(); }
 document.querySelectorAll(".nav-btn").forEach((btn) => btn.addEventListener("click", () => setTab(btn.dataset.tab)));
@@ -167,16 +212,37 @@ async function addMovement() {
   if (!val || val <= 0) { showToast("Ingresa un monto válido"); return; }
   if (!form.category.trim()) { showToast("Ingresa una categoría"); return; }
   const bucketMeta = getBucket(form.bucket);
-  const effType = bucketMeta && bucketMeta.isFondo ? "aporte" : form.movType;
+  const isFondo = bucketMeta && bucketMeta.isFondo;
+  const effType = isFondo ? "aporte" : form.movType;
+
+  let accountId = null, medioPago = null, cuotas = null, efectivoOrigen = null;
+  if (!isFondo && effType === "egreso") {
+    medioPago = form.medioPago;
+    if (medioPago === "debito") {
+      accountId = form.accountId || null;
+    } else if (medioPago === "credito") {
+      if (!form.accountId) { showToast("Elige con qué tarjeta de crédito pagaste"); return; }
+      accountId = form.accountId;
+      cuotas = parseInt(form.cuotas, 10) || 1;
+    } else if (medioPago === "efectivo") {
+      efectivoOrigen = form.efectivoOrigen;
+      if (efectivoOrigen === "cajero") accountId = form.cajeroAccountId || null;
+    }
+  } else if (!isFondo && effType === "ingreso") {
+    accountId = form.accountId || null;
+  } else if (isFondo) {
+    accountId = form.accountId || null;
+  }
+
   const entry = {
     type: effType, bucket: form.bucket, category: form.category.trim(),
     amount: val, date: form.date, note: (form.note || "").trim(),
-    accountId: form.accountId || null, author: authorName || "—",
-    createdAt: Date.now(),
+    accountId, medioPago, cuotas, efectivoOrigen,
+    author: authorName || "—", createdAt: Date.now(),
   };
   try {
     await db.collection("movements").add(entry);
-    form.amount = ""; form.note = ""; form.date = todayISO(); form.scanBanner = false;
+    form.amount = ""; form.note = ""; form.date = todayISO(); form.cuotas = "1";
     showToast("Movimiento guardado");
     setTab("dashboard");
   } catch (err) { showToast("No se pudo guardar: " + err.message); }
@@ -212,14 +278,40 @@ async function saveMeta(bucketId, value) {
 
 async function addAccount() {
   const nombre = bankForm.nombre.trim();
-  const saldo = parseFloat(bankForm.saldoInicial) || 0;
   if (!nombre) { showToast("Ingresa el nombre del banco"); return; }
+  const payload = { nombre, tipo: bankForm.tipo, createdAt: Date.now() };
+  if (bankForm.tipo === "credito") payload.lineaCredito = parseFloat(bankForm.lineaCredito) || 0;
+  else payload.saldoInicial = parseFloat(bankForm.saldoInicial) || 0;
   try {
-    await db.collection("accounts").add({ nombre, saldoInicial: saldo, createdAt: Date.now() });
-    bankForm.nombre = ""; bankForm.saldoInicial = "";
+    await db.collection("accounts").add(payload);
+    bankForm.nombre = ""; bankForm.saldoInicial = ""; bankForm.lineaCredito = "";
     showToast("Cuenta bancaria agregada");
     render();
   } catch (err) { showToast("No se pudo agregar: " + err.message); }
+}
+
+async function payCreditCard() {
+  const val = parseFloat(payForm.amount);
+  if (!val || val <= 0) { showToast("Ingresa un monto válido"); return; }
+  if (!payForm.creditId) { showToast("Elige la tarjeta a pagar"); return; }
+  const creditAcc = accounts.find((a) => a.id === payForm.creditId);
+  try {
+    await db.collection("movements").add({
+      type: "pago_tarjeta", bucket: null, category: `Pago ${creditAcc ? creditAcc.nombre : "tarjeta"}`,
+      amount: val, date: todayISO(), note: "", accountId: payForm.creditId,
+      author: authorName || "—", createdAt: Date.now(),
+    });
+    if (payForm.fromAccountId) {
+      await db.collection("movements").add({
+        type: "egreso", bucket: null, category: `Pago ${creditAcc ? creditAcc.nombre : "tarjeta"}`,
+        amount: val, date: todayISO(), note: "", accountId: payForm.fromAccountId,
+        author: authorName || "—", createdAt: Date.now(),
+      });
+    }
+    payForm.amount = ""; payForm.creditId = ""; payForm.fromAccountId = "";
+    showToast("Pago registrado");
+    render();
+  } catch (err) { showToast("No se pudo registrar el pago: " + err.message); }
 }
 
 async function deleteAccount(id) {
@@ -311,11 +403,14 @@ function renderDashboard(el) {
     </div>
 
     ${accounts.length > 0 ? `
-      <div class="section-label">Saldo por banco</div>
+      <div class="section-label">Saldo por banco / tarjeta</div>
       <div style="display:grid;gap:8px;margin-top:8px">
         ${accounts.map((a) => {
-          const bal = accountBalance(a.id);
-          return `<div class="account-card"><span class="account-name">🏦 ${a.nombre}</span><span class="account-balance" style="color:${bal>=0?'#12151A':'#DC2626'}">${money(bal)}</span></div>`;
+          const st = accountStatus(a);
+          if (a.tipo === "credito") {
+            return `<div class="account-card"><span class="account-name">💳 ${a.nombre}</span><span class="account-balance" style="color:#DC2626">Deuda ${money(st.deuda)}</span></div>`;
+          }
+          return `<div class="account-card"><span class="account-name">🏦 ${a.nombre}</span><span class="account-balance" style="color:${st.saldo>=0?'#12151A':'#DC2626'}">${money(st.saldo)}</span></div>`;
         }).join("")}
       </div>` : ""}
 
@@ -354,15 +449,6 @@ function renderAdd(el) {
 
   el.innerHTML = `
     <div class="chip" style="display:inline-block;margin-top:2px">Registrando como: <strong>${authorName || "—"}</strong></div>
-
-    <button id="scanBtn" class="scan-btn" style="margin-top:12px" ${form.scanning ? "disabled" : ""}>
-      ${form.scanning ? "⏳ Leyendo boleta con IA..." : "📷 Escanear boleta o factura"}
-    </button>
-    ${form.scanBanner ? `
-      <div class="ai-banner">
-        <span>✨</span><span style="flex:1">Datos leídos automáticamente — revisa antes de guardar</span>
-        <button id="dismissBanner">✕</button>
-      </div>` : ""}
 
     ${!isFondo ? `
       <div class="type-row">
@@ -416,14 +502,67 @@ function renderAdd(el) {
       <input id="dateInput" type="date" class="input" value="${form.date}" />
     </div>
 
-    <div class="field">
-      <label class="label">Cuenta bancaria</label>
-      <select id="accountSelect" class="input">
-        <option value="">Sin asignar / efectivo</option>
-        ${accounts.map((a) => `<option value="${a.id}" ${form.accountId===a.id?"selected":""}>${a.nombre}</option>`).join("")}
-      </select>
-      ${accounts.length === 0 ? `<div class="empty-text" style="padding:8px 0 0">Aún no tienes bancos cargados. <a href="#" id="goBancos" style="color:#002A7A;font-weight:700">Agregar uno</a></div>` : ""}
-    </div>
+    ${!isFondo && effType === "egreso" ? `
+      <div class="section-label">Medio de pago</div>
+      <div class="type-row">
+        <button id="pagoDebito" class="type-btn ${form.medioPago==='debito'?'ingreso-active':''}">💳 Débito</button>
+        <button id="pagoCredito" class="type-btn ${form.medioPago==='credito'?'egreso-active':''}">💳 Crédito</button>
+        <button id="pagoEfectivo" class="type-btn ${form.medioPago==='efectivo'?'ingreso-active':''}">💵 Efectivo</button>
+      </div>
+
+      ${form.medioPago === "debito" ? `
+        <div class="field">
+          <label class="label">¿Qué cuenta débito?</label>
+          <select id="accountSelect" class="input">
+            <option value="">Sin asignar</option>
+            ${debitAccounts().map((a) => `<option value="${a.id}" ${form.accountId===a.id?"selected":""}>${a.nombre}</option>`).join("")}
+          </select>
+          ${debitAccounts().length===0 ? `<div class="empty-text" style="padding:8px 0 0">Aún no tienes cuentas débito. <a href="#" id="goBancos" style="color:#002A7A;font-weight:700">Agregar una</a></div>` : ""}
+        </div>` : ""}
+
+      ${form.medioPago === "credito" ? `
+        <div class="field">
+          <label class="label">¿Con qué tarjeta de crédito?</label>
+          <select id="creditAccountSelect" class="input">
+            <option value="">Elige una tarjeta</option>
+            ${creditAccounts().map((a) => `<option value="${a.id}" ${form.accountId===a.id?"selected":""}>${a.nombre}</option>`).join("")}
+          </select>
+          ${creditAccounts().length===0 ? `<div class="empty-text" style="padding:8px 0 0">Aún no tienes tarjetas de crédito. <a href="#" id="goBancos" style="color:#002A7A;font-weight:700">Agregar una</a></div>` : ""}
+        </div>
+        <div class="field">
+          <label class="label">Número de cuotas</label>
+          <input id="cuotasInput" type="number" min="1" class="input" value="${form.cuotas}" />
+        </div>` : ""}
+
+      ${form.medioPago === "efectivo" ? `
+        <div class="field">
+          <label class="label">¿De dónde salió el efectivo?</label>
+          <select id="efectivoOrigenSelect" class="input">
+            <option value="cajero" ${form.efectivoOrigen==='cajero'?"selected":""}>Retiro de cajero</option>
+            <option value="cliente" ${form.efectivoOrigen==='cliente'?"selected":""}>Pago recibido en efectivo (cliente/trabajo)</option>
+            <option value="otro" ${form.efectivoOrigen==='otro'?"selected":""}>Otro</option>
+          </select>
+        </div>
+        ${form.efectivoOrigen === "cajero" ? `
+          <div class="field">
+            <label class="label">¿De qué cuenta débito se retiró?</label>
+            <select id="cajeroAccountSelect" class="input">
+              <option value="">Sin asignar</option>
+              ${debitAccounts().map((a) => `<option value="${a.id}" ${form.cajeroAccountId===a.id?"selected":""}>${a.nombre}</option>`).join("")}
+            </select>
+            <div class="empty-text" style="padding:6px 0 0">Esto descuenta el saldo de esa cuenta, aunque el gasto en sí sea en efectivo.</div>
+          </div>` : ""}
+      ` : ""}
+    ` : `
+      <div class="field">
+        <label class="label">Cuenta bancaria</label>
+        <select id="accountSelect" class="input">
+          <option value="">Sin asignar / efectivo</option>
+          ${debitAccounts().map((a) => `<option value="${a.id}" ${form.accountId===a.id?"selected":""}>${a.nombre}</option>`).join("")}
+        </select>
+        ${debitAccounts().length === 0 ? `<div class="empty-text" style="padding:8px 0 0">Aún no tienes bancos cargados. <a href="#" id="goBancos" style="color:#002A7A;font-weight:700">Agregar uno</a></div>` : ""}
+      </div>
+    `}
 
     <div class="field">
       <label class="label">Nota / comercio (opcional)</label>
@@ -433,9 +572,6 @@ function renderAdd(el) {
     <button id="submitBtn" class="submit-btn">Guardar movimiento</button>
   `;
 
-  document.getElementById("scanBtn").addEventListener("click", openCamera);
-  const dismiss = document.getElementById("dismissBanner");
-  if (dismiss) dismiss.addEventListener("click", () => { form.scanBanner = false; render(); });
   const te = document.getElementById("typeEgreso");
   const ti = document.getElementById("typeIngreso");
   if (te) te.addEventListener("click", () => { form.movType = "egreso"; form.category = ""; render(); });
@@ -457,10 +593,27 @@ function renderAdd(el) {
   document.getElementById("categoryInput").addEventListener("input", (e) => { form.category = e.target.value; });
   document.getElementById("amountInput").addEventListener("input", (e) => { form.amount = e.target.value; });
   document.getElementById("dateInput").addEventListener("input", (e) => { form.date = e.target.value; });
-  document.getElementById("accountSelect").addEventListener("change", (e) => { form.accountId = e.target.value; });
+  const accSel = document.getElementById("accountSelect");
+  if (accSel) accSel.addEventListener("change", (e) => { form.accountId = e.target.value; });
   document.getElementById("noteInput").addEventListener("input", (e) => { form.note = e.target.value; });
   const goBancos = document.getElementById("goBancos");
   if (goBancos) goBancos.addEventListener("click", (e) => { e.preventDefault(); setTab("bancos"); });
+
+  const pd = document.getElementById("pagoDebito");
+  const pc = document.getElementById("pagoCredito");
+  const pe = document.getElementById("pagoEfectivo");
+  if (pd) pd.addEventListener("click", () => { form.medioPago = "debito"; form.accountId = ""; render(); });
+  if (pc) pc.addEventListener("click", () => { form.medioPago = "credito"; form.accountId = ""; render(); });
+  if (pe) pe.addEventListener("click", () => { form.medioPago = "efectivo"; form.accountId = ""; render(); });
+  const creditSel = document.getElementById("creditAccountSelect");
+  if (creditSel) creditSel.addEventListener("change", (e) => { form.accountId = e.target.value; });
+  const cuotasInput = document.getElementById("cuotasInput");
+  if (cuotasInput) cuotasInput.addEventListener("input", (e) => { form.cuotas = e.target.value; });
+  const efectivoSel = document.getElementById("efectivoOrigenSelect");
+  if (efectivoSel) efectivoSel.addEventListener("change", (e) => { form.efectivoOrigen = e.target.value; render(); });
+  const cajeroSel = document.getElementById("cajeroAccountSelect");
+  if (cajeroSel) cajeroSel.addEventListener("change", (e) => { form.cajeroAccountId = e.target.value; });
+
   document.getElementById("submitBtn").addEventListener("click", addMovement);
 }
 
@@ -513,7 +666,9 @@ function renderMovs(el) {
               <div class="tx-sub">${e.date}${e.note ? " · " + e.note : ""}</div>
               <div class="tx-tags">
                 <span class="tx-tag">${meta.label}</span>
-                ${acc ? `<span class="tx-tag">🏦 ${acc.nombre}</span>` : ""}
+                ${acc ? `<span class="tx-tag">${acc.tipo==='credito'?'💳':'🏦'} ${acc.nombre}</span>` : ""}
+                ${e.medioPago === "credito" ? `<span class="tx-tag">💳 ${e.cuotas > 1 ? e.cuotas + " cuotas" : "1 cuota"}</span>` : ""}
+                ${e.medioPago === "efectivo" ? `<span class="tx-tag">💵 Efectivo${e.efectivoOrigen==='cajero'?' (cajero)':e.efectivoOrigen==='cliente'?' (cliente)':''}</span>` : ""}
                 ${e.author ? `<span class="tx-tag">👤 ${e.author}</span>` : ""}
               </div>
             </div>
@@ -522,6 +677,8 @@ function renderMovs(el) {
           </div>`;
       }).join("")}
     </div>
+
+    <button id="exportPdfBtn" class="submit-btn submit-btn-secondary" style="margin-top:18px">📄 Generar reporte PDF de este periodo</button>
   `;
 
   document.getElementById("monthFilter").addEventListener("input", (e) => { filters.month = e.target.value; render(); });
@@ -530,6 +687,7 @@ function renderMovs(el) {
   document.querySelectorAll(".delete-btn").forEach((b) => b.addEventListener("click", () => {
     if (confirm("¿Eliminar este movimiento?")) deleteMovement(b.dataset.id);
   }));
+  document.getElementById("exportPdfBtn").addEventListener("click", () => generatePDFReport(list, breakdownArr, total));
 }
 
 function renderFondos(el) {
@@ -574,102 +732,211 @@ function renderFondos(el) {
 }
 
 function renderBancos(el) {
-  const total = accounts.reduce((a, acc) => a + accountBalance(acc.id), 0);
-  el.innerHTML = `
-    <div class="section-label">Saldo total disponible</div>
-    <div class="big-number">${money(total)}</div>
+  const totalDebito = debitAccounts().reduce((a, acc) => a + accountStatus(acc).saldo, 0);
+  const totalDeuda = creditAccounts().reduce((a, acc) => a + accountStatus(acc).deuda, 0);
 
-    <div style="display:grid;gap:8px;margin-top:14px">
-      ${accounts.length === 0 ? `<div class="empty-text">Aún no tienes bancos cargados.</div>` : accounts.map((a) => {
-        const bal = accountBalance(a.id);
-        return `
-          <div class="account-card">
-            <div>
-              <div class="account-name">🏦 ${a.nombre}</div>
-              <div class="card-sub">Saldo inicial: ${money(a.saldoInicial)}</div>
+  el.innerHTML = `
+    <div class="stats-grid" style="grid-template-columns:1fr 1fr">
+      <div class="stat-card" style="border-color:#16A34A55"><div>🏦</div><div class="stat-label">Saldo en cuentas débito</div><div class="stat-value" style="color:#16A34A">${money(totalDebito)}</div></div>
+      <div class="stat-card" style="border-color:#DC262655"><div>💳</div><div class="stat-label">Deuda en tarjetas</div><div class="stat-value" style="color:#DC2626">${money(totalDeuda)}</div></div>
+    </div>
+
+    <div class="section-label">Cuentas débito</div>
+    <div style="display:grid;gap:8px;margin-top:8px">
+      ${debitAccounts().length === 0 ? `<div class="empty-text">Aún no tienes cuentas débito.</div>` : debitAccounts().map((a) => {
+        const st = accountStatus(a);
+        return `<div class="account-card">
+          <div><div class="account-name">🏦 ${a.nombre}</div><div class="card-sub">Saldo inicial: ${money(a.saldoInicial)}</div></div>
+          <div style="display:flex;align-items:center;gap:10px"><span class="account-balance" style="color:${st.saldo>=0?'#12151A':'#DC2626'}">${money(st.saldo)}</span><button class="delete-btn" data-id="${a.id}">🗑️</button></div>
+        </div>`;
+      }).join("")}
+    </div>
+
+    <div class="section-label">Tarjetas de crédito</div>
+    <div style="display:grid;gap:8px;margin-top:8px">
+      ${creditAccounts().length === 0 ? `<div class="empty-text">Aún no tienes tarjetas de crédito.</div>` : creditAccounts().map((a) => {
+        const st = accountStatus(a);
+        const pct = st.linea > 0 ? Math.min(100, (st.deuda / st.linea) * 100) : 0;
+        return `<div class="card card-block" style="border-left:3px solid #DC2626">
+          <div class="bucket-card-head"><div class="icon-circle" style="background:#DC262622">💳</div><div class="card-label">${a.nombre}</div></div>
+          <div class="bucket-io-row">
+            <div><div class="bucket-io-label">Deuda actual</div><div class="bucket-io-value" style="color:#DC2626">${money(st.deuda)}</div></div>
+            <div style="text-align:right"><div class="bucket-io-label">Disponible</div><div class="bucket-io-value" style="color:#16A34A">${money(st.disponible)}</div></div>
+          </div>
+          <div style="margin-top:10px"><div class="progress-track"><div class="progress-fill" style="width:${pct}%;background:#DC2626"></div></div><div class="progress-text">${pct.toFixed(1)}% usado de ${money(st.linea)}</div></div>
+          <button class="delete-btn pay-card-toggle" data-id="${a.id}" style="margin-top:8px;font-size:12px;color:#002A7A;font-weight:700">💰 Pagar esta tarjeta</button>
+          <button class="delete-btn" data-id="${a.id}" style="float:right">🗑️</button>
+          ${payForm.creditId === a.id ? `
+            <div class="field">
+              <label class="label">Monto a pagar</label>
+              <input id="payAmountInput" type="number" class="input" value="${payForm.amount}" />
             </div>
-            <div style="display:flex;align-items:center;gap:10px">
-              <span class="account-balance" style="color:${bal>=0?'#12151A':'#DC2626'}">${money(bal)}</span>
-              <button class="delete-btn" data-id="${a.id}">🗑️</button>
+            <div class="field">
+              <label class="label">¿De qué cuenta débito sale el pago? (opcional)</label>
+              <select id="payFromSelect" class="input">
+                <option value="">No descontar de ninguna cuenta</option>
+                ${debitAccounts().map((d) => `<option value="${d.id}" ${payForm.fromAccountId===d.id?"selected":""}>${d.nombre}</option>`).join("")}
+              </select>
             </div>
-          </div>`;
+            <button id="confirmPayBtn" class="submit-btn">Confirmar pago</button>
+          ` : ""}
+        </div>`;
       }).join("")}
     </div>
 
     <div class="section-label">Agregar cuenta bancaria</div>
-    <div class="field">
-      <label class="label">Nombre del banco (ej: Banco Estado, Santander tarjeta...)</label>
-      <input id="bankNameInput" type="text" class="input" placeholder="Nombre del banco" value="${bankForm.nombre}" />
+    <div class="type-row">
+      <button id="tipoDebitoBtn" class="type-btn ${bankForm.tipo==='debito'?'ingreso-active':''}">🏦 Débito</button>
+      <button id="tipoCreditoBtn" class="type-btn ${bankForm.tipo==='credito'?'egreso-active':''}">💳 Crédito</button>
     </div>
     <div class="field">
-      <label class="label">Saldo inicial actual (CLP)</label>
-      <input id="bankBalanceInput" type="number" class="input" placeholder="0" value="${bankForm.saldoInicial}" />
+      <label class="label">Nombre del banco / tarjeta</label>
+      <input id="bankNameInput" type="text" class="input" placeholder="Ej: Banco Estado, Falabella Visa..." value="${bankForm.nombre}" />
     </div>
+    ${bankForm.tipo === "debito" ? `
+      <div class="field">
+        <label class="label">Saldo inicial actual (CLP)</label>
+        <input id="bankBalanceInput" type="number" class="input" placeholder="0" value="${bankForm.saldoInicial}" />
+      </div>` : `
+      <div class="field">
+        <label class="label">Línea de crédito total (CLP)</label>
+        <input id="bankLineaInput" type="number" class="input" placeholder="Ej: 1500000" value="${bankForm.lineaCredito}" />
+      </div>`}
     <button id="addBankBtn" class="submit-btn">Agregar cuenta bancaria</button>
-    <div class="empty-text" style="margin-top:14px">A partir de aquí, cada ingreso o egreso que asignes a este banco ajusta el saldo automáticamente.</div>
+    <div class="empty-text" style="margin-top:14px">Cada egreso o ingreso que asignes a un banco/tarjeta ajusta su saldo o deuda automáticamente.</div>
   `;
 
+  document.getElementById("tipoDebitoBtn").addEventListener("click", () => { bankForm.tipo = "debito"; render(); });
+  document.getElementById("tipoCreditoBtn").addEventListener("click", () => { bankForm.tipo = "credito"; render(); });
   document.getElementById("bankNameInput").addEventListener("input", (e) => { bankForm.nombre = e.target.value; });
-  document.getElementById("bankBalanceInput").addEventListener("input", (e) => { bankForm.saldoInicial = e.target.value; });
+  const bBal = document.getElementById("bankBalanceInput");
+  if (bBal) bBal.addEventListener("input", (e) => { bankForm.saldoInicial = e.target.value; });
+  const bLinea = document.getElementById("bankLineaInput");
+  if (bLinea) bLinea.addEventListener("input", (e) => { bankForm.lineaCredito = e.target.value; });
   document.getElementById("addBankBtn").addEventListener("click", addAccount);
-  document.querySelectorAll(".delete-btn").forEach((b) => b.addEventListener("click", () => deleteAccount(b.dataset.id)));
+
+  document.querySelectorAll(".pay-card-toggle").forEach((b) => b.addEventListener("click", () => {
+    payForm.creditId = payForm.creditId === b.dataset.id ? "" : b.dataset.id;
+    render();
+  }));
+  const payAmount = document.getElementById("payAmountInput");
+  if (payAmount) payAmount.addEventListener("input", (e) => { payForm.amount = e.target.value; });
+  const payFrom = document.getElementById("payFromSelect");
+  if (payFrom) payFrom.addEventListener("change", (e) => { payForm.fromAccountId = e.target.value; });
+  const confirmPay = document.getElementById("confirmPayBtn");
+  if (confirmPay) confirmPay.addEventListener("click", payCreditCard);
+
+  document.querySelectorAll(".delete-btn:not(.pay-card-toggle)").forEach((b) => b.addEventListener("click", () => deleteAccount(b.dataset.id)));
 }
 
-// ---------- Cámara en vivo ----------
-async function openCamera() {
-  try {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("no-camera-api");
-    cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
-    const video = document.getElementById("cameraVideo");
-    video.srcObject = cameraStream;
-    video.play().catch(() => {});
-    document.getElementById("cameraOverlay").style.display = "flex";
-  } catch (err) { showToast("No pude abrir la cámara. Revisa los permisos del navegador."); }
+// ---------- Reporte PDF ----------
+function loadImageAsBase64(url) {
+  return fetch(url)
+    .then((r) => r.blob())
+    .then((blob) => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    }));
 }
-function closeCamera() {
-  if (cameraStream) { cameraStream.getTracks().forEach((t) => t.stop()); cameraStream = null; }
-  document.getElementById("cameraOverlay").style.display = "none";
-}
-function capturePhoto() {
-  const video = document.getElementById("cameraVideo");
-  if (!video.videoWidth) return;
-  const canvas = document.createElement("canvas");
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  canvas.getContext("2d").drawImage(video, 0, 0);
-  const base64 = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
-  closeCamera();
-  scanReceipt(base64);
-}
-document.getElementById("cameraClose").addEventListener("click", closeCamera);
-document.getElementById("captureBtn").addEventListener("click", capturePhoto);
 
-// ---------- Escaneo vía función serverless segura ----------
-async function scanReceipt(base64) {
-  form.scanning = true; render();
-  try {
-    const res = await fetch("/api/scan", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: base64, mediaType: "image/jpeg" }),
+async function generatePDFReport(list, breakdownArr, total) {
+  if (!window.jspdf) { showToast("No se pudo cargar el generador de PDF"); return; }
+  showToast("Generando reporte...");
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  const [y, m] = filters.month.split("-");
+  const periodLabel = `${MONTHS_ES[parseInt(m, 10) - 1]} ${y}`;
+  const bucketLabel = filters.bucket === "all" ? "Todas las cuentas" : (getBucket(filters.bucket) || {}).label || filters.bucket;
+  const typeLabel = filters.type === "all" ? "Ingresos y egresos" : filters.type === "ingreso" ? "Solo ingresos" : filters.type === "egreso" ? "Solo egresos" : "Solo aportes";
+
+  let logoData = null;
+  try { logoData = await loadImageAsBase64("icons/icon-192.png"); } catch { logoData = null; }
+
+  const marginX = 14;
+  let cursorY = 18;
+  if (logoData) {
+    doc.addImage(logoData, "PNG", marginX, 10, 16, 16);
+  }
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(15);
+  doc.setTextColor(0, 42, 122);
+  doc.text("Control Financiero — Familia Palma", logoData ? marginX + 20 : marginX, cursorY);
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(10);
+  doc.setTextColor(90, 90, 90);
+  cursorY += 7;
+  doc.text(`Periodo: ${periodLabel}  ·  Filtro: ${bucketLabel}  ·  ${typeLabel}`, marginX, cursorY);
+  cursorY += 5;
+  doc.text(`Generado el ${new Date().toLocaleDateString("es-CL")} por ${authorName || "—"}`, marginX, cursorY);
+
+  cursorY += 10;
+  doc.setDrawColor(220, 220, 220);
+  doc.line(marginX, cursorY, 196, cursorY);
+  cursorY += 8;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(12);
+  doc.setTextColor(18, 21, 26);
+  doc.text(`Total del periodo: ${money(total)}`, marginX, cursorY);
+  cursorY += 8;
+
+  if (breakdownArr.length > 0) {
+    doc.autoTable({
+      startY: cursorY,
+      margin: { left: marginX, right: marginX },
+      head: [["Categoría", "Monto"]],
+      body: breakdownArr.map(([cat, val]) => [cat, money(val)]),
+      theme: "grid",
+      headStyles: { fillColor: [0, 42, 122], textColor: 255, fontSize: 10 },
+      styles: { fontSize: 9, cellPadding: 3 },
+      columnStyles: { 1: { halign: "right" } },
     });
-    if (!res.ok) throw new Error("Fallo del servidor");
-    const parsed = await res.json();
+    cursorY = doc.lastAutoTable.finalY + 10;
+  }
 
-    const negocioMap = { dr_hogar: "dr_hogar", fpg: "fpg", personal: "personal" };
-    const negocio = negocioMap[parsed.negocio_sugerido] || "personal";
-    const tipo = parsed.tipo === "ingreso" ? "ingreso" : "egreso";
+  const rows = list.slice().sort((a, b) => (a.date < b.date ? 1 : -1)).map((e) => {
+    const meta = getBucket(e.bucket);
+    const acc = accounts.find((a) => a.id === e.accountId);
+    const medio = e.medioPago === "credito" ? `Crédito (${e.cuotas || 1}c)` : e.medioPago === "efectivo" ? "Efectivo" : e.medioPago === "debito" ? "Débito" : "—";
+    const signo = e.type === "ingreso" ? "+" : "-";
+    return [e.date, e.category, meta.label, medio, acc ? acc.nombre : "—", e.author || "—", `${signo}${money(e.amount)}`];
+  });
 
-    form.bucket = negocio;
-    form.movType = tipo;
-    form.category = parsed.categoria_sugerida || "";
-    form.amount = parsed.monto ? String(parsed.monto) : "";
-    form.date = parsed.fecha && /^\d{4}-\d{2}-\d{2}$/.test(parsed.fecha) ? parsed.fecha : todayISO();
-    form.note = parsed.comercio || "";
-    form.scanBanner = true;
-    showToast("Boleta leída — revisa antes de guardar");
-  } catch (err) { showToast("No pude leer la boleta. Ingresa los datos a mano."); }
-  finally { form.scanning = false; render(); }
+  if (rows.length > 0) {
+    doc.autoTable({
+      startY: cursorY,
+      margin: { left: marginX, right: marginX },
+      head: [["Fecha", "Categoría", "Cuenta", "Medio", "Banco", "Autor", "Monto"]],
+      body: rows,
+      theme: "striped",
+      headStyles: { fillColor: [0, 42, 122], textColor: 255, fontSize: 9 },
+      styles: { fontSize: 8, cellPadding: 2.5 },
+      columnStyles: { 6: { halign: "right" } },
+      didParseCell: (data) => {
+        if (data.section === "body" && data.column.index === 6) {
+          const val = data.cell.raw;
+          data.cell.styles.textColor = val.startsWith("+") ? [22, 163, 74] : [220, 38, 38];
+        }
+      },
+    });
+  } else {
+    doc.setFont("helvetica", "italic");
+    doc.setFontSize(10);
+    doc.text("Sin movimientos en este periodo.", marginX, cursorY);
+  }
+
+  const pageCount = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= pageCount; i++) {
+    doc.setPage(i);
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(`Página ${i} de ${pageCount}`, 196, 290, { align: "right" });
+  }
+
+  doc.save(`reporte-control-financiero-${filters.month}.pdf`);
 }
 
 // ---------- PWA: registrar service worker ----------

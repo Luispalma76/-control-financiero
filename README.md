@@ -39,12 +39,6 @@ orden exacto.
 7. Ahora ve a **⚙️ Configuración del proyecto** (ícono de engranaje, arriba a la izquierda) → **Tus apps** → clic en el ícono `</>` (Web) → nómbrala "control-financiero-web" → Registrar app
 8. Te va a mostrar un bloque de código con `apiKey`, `authDomain`, `projectId`, etc. **Copia esos valores**, los vas a necesitar en el Paso 2.
 
-### 1.4 API key de Anthropic (para que el escaneo de boletas funcione)
-1. Ve a **console.anthropic.com**
-2. Crea tu cuenta
-3. Ve a **Billing** y carga un método de pago (el uso de esta función es muy bajo costo: cada boleta escaneada cuesta centavos de dólar)
-4. Ve a **API Keys** → "Create Key" → nómbrala "control-financiero" → **cópiala y guárdala en un lugar seguro** (solo se muestra una vez)
-
 ---
 
 ## PARTE 2 — Configurar el código
@@ -72,14 +66,6 @@ orden exacto.
 3. Deja todas las opciones por defecto → clic en **"Deploy"**
 4. Espera ~1 minuto. Te va a dar una URL tipo `control-financiero-xxxx.vercel.app`
 
-### Ahora agrega tu llave de Anthropic (paso obligatorio para el escaneo):
-1. En el proyecto dentro de Vercel, ve a **Settings > Environment Variables**
-2. Agrega:
-   - Name: `ANTHROPIC_API_KEY`
-   - Value: (pega la key que copiaste en el paso 1.4)
-3. Guarda
-4. Ve a la pestaña **Deployments** → en el último deploy, clic en los 3 puntos → **"Redeploy"** (esto es necesario para que tome la nueva variable)
-
 ---
 
 ## PARTE 5 — Instalar en tu celular y PC
@@ -93,15 +79,33 @@ Listo — queda como app en ambos, con el mismo ícono, y **todo lo que cargues 
 
 ---
 
-## Cómo probar que el escaneo de boletas funciona
-1. Abre la app → pestaña "Agregar" → "Escanear boleta o factura"
-2. Da permiso de cámara cuando lo pida el navegador
-3. Enfoca una boleta y toca el botón blanco
-4. En unos segundos debería rellenar monto, fecha, comercio y categoría — revisa y ajusta si algo quedó mal, luego "Guardar movimiento"
+## PARTE 6 — Activar la clave de acceso (seguridad)
+
+Esto evita que cualquiera con el link de la app pueda entrar a ver o escribir datos.
+
+1. Ve a **console.firebase.google.com** → tu proyecto → menú izquierdo → **Compilación (Build) → Authentication**
+2. Clic en **"Comenzar" / "Get Started"**
+3. En la lista de proveedores, busca **"Anónimo" / "Anonymous"** → actívalo (toggle) → Guardar
+4. Ve a **Firestore Database → Reglas**, borra el contenido y reemplázalo por esto:
+   ```
+   rules_version = '2';
+   service cloud.firestore {
+     match /databases/{database}/documents {
+       match /{document=**} {
+         allow read, write: if request.auth != null;
+       }
+     }
+   }
+   ```
+5. Clic en **Publicar**
+
+A partir de aquí, nadie puede leer ni escribir en la base de datos sin antes pasar la pantalla de clave dentro de la app. La clave se guarda en `config.js` (`window.APP_PIN`) — puedes cambiarla ahí cuando quieras, solo avisa a todos los que la usan.
+
+> **Límite honesto:** esto bloquea a cualquier visitante casual o rastreador automático. No es cifrado de grado bancario — alguien con conocimientos técnicos avanzados que inspeccione el código fuente podría, en teoría, evitarlo. Para datos familiares y de negocio como los tuyos, es un nivel de protección razonable.
+
+---
 
 ## Si algo falla
 - **"Error de conexión" al abrir la app** → revisa que copiaste bien los datos de Firebase en `config.js`
-- **El escaneo da error** → revisa que agregaste `ANTHROPIC_API_KEY` en Vercel y que hiciste "Redeploy" después
-- **La cámara no abre** → asegúrate de estar en Chrome/Safari (no en una app embebida) y dar el permiso cuando lo pida
 
 Cualquier error, mándame el mensaje exacto que te sale y seguimos ajustando desde aquí.

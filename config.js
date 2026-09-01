@@ -11,3 +11,6 @@ window.FIREBASE_CONFIG = {
   messagingSenderId: "519572428277",
   appId: "1:519572428277:web:4b788aa7234434179e7cbc",
 };
+
+// Clave de acceso compartida entre Luis y Perla. Cámbiala aquí cuando quieras.
+window.APP_PIN = "mamamirian";

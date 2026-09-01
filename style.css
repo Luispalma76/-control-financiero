@@ -147,3 +147,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
 .account-balance { font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 16px; }
 .tx-tags { display: flex; gap: 6px; margin-top: 3px; flex-wrap: wrap; }
 .tx-tag { font-size: 10px; background: #F1F4F9; color: #6B7280; padding: 2px 7px; border-radius: 8px; font-weight: 600; }
+
+.lock-screen { position: fixed; inset: 0; background: #0B0D10; z-index: 80; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.lock-box { max-width: 300px; width: 100%; text-align: center; }
+.lock-box .input { background: #15171C; border-color: #2E333C; color: #EDEFF2; }
